@@ -3,12 +3,12 @@
 # where anyone can download them and installed apps look for updates.
 #
 # This repository is public, so GitHub Actions is free here. The source
-# stays private: it is checked out with a read-only token (secret
-# SOURCE_TOKEN) and never uploaded; only the installers are.
+# stays private: it is checked out with a read-only deploy key (secret
+# SOURCE_SSH_KEY) and never uploaded; only the installers are.
 #
 # Only people with write access can start this (Actions > Build Facetra >
 # Run workflow). There is no push or pull_request trigger on purpose, so
-# nobody else can run code with the token.
+# nobody else can run code with the key.
 name: Build Facetra
 
 on:
@@ -61,7 +61,7 @@ jobs:
         with:
           repository: ${{ env.SOURCE_REPO }}
           ref: ${{ inputs.version }}
-          token: ${{ secrets.SOURCE_TOKEN }}
+          ssh-key: ${{ secrets.SOURCE_SSH_KEY }}
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
