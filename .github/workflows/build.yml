@@ -112,6 +112,8 @@ jobs:
           if [ -z "$CSC_LINK" ]; then
             echo "::warning::No signing certificate: building UNSIGNED installers."
             export CSC_IDENTITY_AUTO_DISCOVERY=false
+            # An empty CSC_LINK makes electron-builder look for a certificate file.
+            unset CSC_LINK CSC_KEY_PASSWORD
           fi
           pnpm build
           pnpm exec electron-builder --config electron-builder.yml ${{ matrix.builder }} --publish never "-c.publish.url=$FACETRA_UPDATE_URL"
