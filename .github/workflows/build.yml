@@ -1,0 +1,151 @@
+# Builds Facetra installers for Windows, macOS and Linux from the PRIVATE
+# source repository and publishes them as a draft release HERE (public),
+# where anyone can download them and installed apps look for updates.
+#
+# This repository is public, so GitHub Actions is free here. The source
+# stays private: it is checked out with a read-only token (secret
+# SOURCE_TOKEN) and never uploaded; only the installers are.
+#
+# Only people with write access can start this (Actions > Build Facetra >
+# Run workflow). There is no push or pull_request trigger on purpose, so
+# nobody else can run code with the token.
+name: Build Facetra
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Tag in the source repository to build, e.g. v0.2.0'
+        required: true
+
+permissions:
+  contents: write # create the release in this repository
+
+env:
+  SOURCE_REPO: MONARCHKOLI/facetra
+  # Installed apps check this folder; GitHub redirects it to the newest
+  # published (non-draft, non-pre-release) release's files.
+  FACETRA_UPDATE_URL: https://github.com/${{ github.repository }}/releases/latest/download
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-latest
+            targets: x86_64-unknown-linux-gnu
+            rust_targets: x86_64-unknown-linux-gnu
+            builder: --linux --x64
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            targets: aarch64-unknown-linux-gnu
+            rust_targets: aarch64-unknown-linux-gnu
+            builder: --linux --arm64
+          - name: mac
+            runner: macos-latest
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            builder: --mac --arm64 --x64
+          - name: windows
+            runner: windows-latest
+            targets: x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+            rust_targets: x86_64-pc-windows-msvc,aarch64-pc-windows-msvc
+            builder: --win --x64 --arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out the private source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.version }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          key: ${{ matrix.name }}
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check the tag matches the app version
+        shell: bash
+        run: |
+          app_version=$(node -p "require('./apps/desktop/package.json').version")
+          if [ "v$app_version" != "${{ inputs.version }}" ]; then
+            echo "Tag ${{ inputs.version }} does not match apps/desktop/package.json version $app_version" >&2
+            exit 1
+          fi
+
+      - name: Build and stage the engine
+        shell: bash
+        run: |
+          for target in ${{ matrix.targets }}; do
+            cargo build --release --target "$target" --manifest-path engine/Cargo.toml
+            node apps/desktop/scripts/stage-engine.mjs --target "$target"
+          done
+
+      - name: Build installers
+        shell: bash
+        working-directory: apps/desktop
+        env:
+          # Optional signing (see docs/RELEASING.md in the source repository).
+          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MAC_CSC_LINK || runner.os == 'Windows' && secrets.WIN_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MAC_CSC_KEY_PASSWORD || runner.os == 'Windows' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$CSC_LINK" ]; then
+            echo "::warning::No signing certificate: building UNSIGNED installers."
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+          fi
+          pnpm build
+          pnpm exec electron-builder --config electron-builder.yml ${{ matrix.builder }} --publish never "-c.publish.url=$FACETRA_UPDATE_URL"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.name }}
+          path: |
+            apps/desktop/dist/*.exe
+            apps/desktop/dist/*.blockmap
+            apps/desktop/dist/*.dmg
+            apps/desktop/dist/*.zip
+            apps/desktop/dist/*.AppImage
+            apps/desktop/dist/*.deb
+            apps/desktop/dist/latest*.yml
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish (draft)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          path: release
+          merge-multiple: true
+      - name: Create a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la release
+          gh release create "${{ inputs.version }}" release/* \
+            --repo "${{ github.repository }}" --draft \
+            --title "Facetra ${{ inputs.version }}" \
+            --notes "Downloads: Windows (.exe), macOS (.dmg), Linux (.deb recommended, .AppImage). See README for first-run steps."
